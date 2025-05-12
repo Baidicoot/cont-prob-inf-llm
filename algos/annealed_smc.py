@@ -1,6 +1,6 @@
 import torch
 from torch.distributions import Categorical
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 import numpy as np
 
 class AnnealedSMC:
@@ -31,8 +31,8 @@ class AnnealedSMC:
         self.N = N
         self.x_dim = x_dim
         self.sigma_0 = sigma_0
-        self.sigma_prev = sigma_0
         self.sigma_target = sigma_target
+        self.sigma_prev = None # None indicates that we should use the initial logp
         self.alpha = alpha
         self.mala_step_size = mala_step_size
         self.mala_steps = mala_steps
@@ -44,7 +44,7 @@ class AnnealedSMC:
         self.X = torch.zeros(N, x_dim, device=device, dtype=torch.float32)
         self.logw = torch.zeros(N, device=device, dtype=torch.float32)  # unnormalized log-weights
 
-    def initialize(self, init_sampler):
+    def initialize(self, init_sampler, init_logp):
         """
         init_sampler: a function taking (N, x_dim) and returning a tensor of shape (N, x_dim).
         Typically you sample from a very flat p_{σ_0} or from a simple prior.
@@ -55,31 +55,33 @@ class AnnealedSMC:
     @staticmethod
     def compute_ess(logw):
         w = torch.softmax(logw, 0)
-        print(f"w: {w}")
         return 1.0 / torch.sum(w * w)
 
-    def adapt_sigma(self, log_target):
+    def ess_at(self, sigma, log_target, init_logp):
+        if self.sigma_prev is not None:
+            delta = log_target(self.X, sigma) - log_target(self.X, self.sigma_prev)
+            lw = self.logw + delta
+        else:
+            lw = log_target(self.X, sigma) - init_logp(self.X)
+        return self.compute_ess(lw)
+
+    def adapt_sigma(self, log_target, init_logp):
         """
         Find the next σ_t < σ_{t-1} by bisection so that ESS >= ess_min.
         """
-        lo = self.sigma_target
-        hi = self.sigma_prev
+        # currently this just gets stuck at the first sigma value
 
-        def ess_at(sigma):
-            delta = log_target(self.X, sigma) - log_target(self.X, self.sigma_prev)
-            lw = self.logw + delta
-            ess = self.compute_ess(lw)
-            print(f"ess at {sigma}: {ess}")
-            return ess
+        lo = self.sigma_target
+        hi = self.sigma_prev if self.sigma_prev is not None else self.sigma_0
 
         # if even at target we have enough ESS, we can jump all the way
-        if ess_at(lo) >= self.ess_min:
+        if self.ess_at(lo, log_target, init_logp) >= self.ess_min:
             return lo
 
         # otherwise bisect
         while hi - lo > self.ess_tol:
             mid = 0.5 * (hi + lo)
-            if ess_at(mid) < self.ess_min:
+            if self.ess_at(mid, log_target, init_logp) < self.ess_min:
                 # too aggressive → need smaller step (i.e. larger σ)
                 lo = mid
             else:
@@ -90,7 +92,7 @@ class AnnealedSMC:
         """
         Multinomial resampling (you can swap in systematic, stratified, etc.)
         """
-        w = torch.exp(self.logw - torch.logsumexp(self.logw, 0))
+        w = torch.softmax(self.logw, 0)
         idx = Categorical(w).sample((self.N,))
         self.X = self.X[idx]
         self.logw.zero_()
@@ -125,16 +127,14 @@ class AnnealedSMC:
 
                 # update
                 X = torch.where(accept, X_prop, X)
-
-                print(f"acceptance rate: {accept.float().mean()}")
         return X
 
-    def run(self, init_sampler, log_target, grad_log_target):
+    def run(self, init_sampler, init_logp, log_target, grad_log_target):
         """
         Runs the full adaptive‐SMC‐with‐MALA algorithm, returns final particles X.
         """
         # 1. initialize
-        self.initialize(init_sampler)
+        self.initialize(init_sampler, init_logp)
 
         progress = tqdm(range(100), desc="Running SMC")
 
@@ -142,23 +142,29 @@ class AnnealedSMC:
         def convert_sigma_to_index(sigma):
             return int(np.log(sigma / self.sigma_target) / np.log(self.sigma_0 / self.sigma_target) * 100)
         
-        curr_index = convert_sigma_to_index(self.sigma_prev)
+        curr_index = convert_sigma_to_index(self.sigma_0)
 
         t = 0
         # 2. sequential tempering
-        while self.sigma_prev > self.sigma_target + self.ess_tol:
+        while self.sigma_prev is None or self.sigma_prev > self.sigma_target + self.ess_tol:
             # 2a. adapt σ_t
-            sigma_t = self.adapt_sigma(log_target)
+            sigma_t = self.adapt_sigma(log_target, init_logp)
 
             print(f"sigma_{t}: {sigma_t}")
 
             # 2b. weight‐update
-            delta = log_target(self.X, sigma_t) - log_target(self.X, self.sigma_prev)
+            if self.sigma_prev is not None:
+                delta = log_target(self.X, sigma_t) - log_target(self.X, self.sigma_prev)
+            else:
+                delta = log_target(self.X, sigma_t) - init_logp(self.X)
+            print(f"delta: {delta}")
             self.logw += delta
 
             # 2c. check ESS → maybe resample
             ess = self.compute_ess(self.logw)
+            print(f"current ESS: {ess}")
             if ess < self.alpha * self.N:
+                print("resampling...")
                 self.resample()
 
             # 2d. mutate with MALA

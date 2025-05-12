@@ -11,47 +11,47 @@ def build_relaxed_single_token_prior(
     tokenizer: GPT2Tokenizer,
     device: torch.device,
 ):
-    """
-    A single-token prior based of a simple mixture of Gaussians.
-    """
+    """Return a callable that, for any σ, yields functional prior handles."""
+
+    # Static objects shared across all σ
     with torch.no_grad():
         bos = torch.tensor([[tokenizer.eos_token_id]], device=device)
-        logits = model(bos).logits[:, -1]                               # (1,V)
-        prior_probs = logits.softmax(-1).squeeze(0)                     # (V,)
-    E: torch.Tensor = model.transformer.wte.weight.detach()             # (V,d)
+        logits = model(bos).logits[:, -1]                # (1,V)
+        prior_probs = logits.softmax(-1).squeeze(0)      # (V,)
+    E: torch.Tensor = model.transformer.wte.weight.detach()  # (V,d)
     V, d = E.shape
 
+    # def factory():
     def logp(z: torch.Tensor, σ: float) -> torch.Tensor:
         const = -0.5 * d * math.log(2 * math.pi * σ * σ)
         inv_var = 1.0 / (σ * σ)
-        
-        diff = z.unsqueeze(1) - E.unsqueeze(0)                          # (N,V,d)
-        mahal = diff.square().sum(-1)                                   # (N,V)
-        log_gauss = const - 0.5 * inv_var * mahal                       # (N,V)
+        diff = z.unsqueeze(1) - E.unsqueeze(0)        # (N,V,d)
+        mahal = diff.square().sum(-1)                # (N,V)
+        log_gauss = const - 0.5 * inv_var * mahal    # (N,V)
         log_weighted = log_gauss + prior_probs.log().unsqueeze(0)
-        return torch.logsumexp(log_weighted, dim=-1)                    # (N,)
+        return torch.logsumexp(log_weighted, dim=-1) # (N,)
 
     def grad(z: torch.Tensor, σ: float) -> torch.Tensor:
         return torch.func.grad(lambda x: logp(x, σ).sum())(z)
 
     def sample(num: int, σ: float) -> torch.Tensor:
         cat = Categorical(prior_probs)
-        tokens = cat.sample((num,))                                     # (num,)
-        base = E[tokens]                                                # (num,d)
-        noise = torch.randn_like(base, dtype=torch.float32) * σ
+        tokens = cat.sample((num,))                  # (num,)
+        base = E[tokens]                             # (num,d)
+        noise = torch.randn_like(base) * σ
         return base + noise
 
     return logp, grad, sample
+    # return factory
 
 def build_suffix_likelihood(
     model: GPT2LMHeadModel,
     tokenizer: GPT2Tokenizer,
+    # suffix: str,
     suffix_ids: List[int],
     device: torch.device,
 ):
-    """
-    Calculates the log-likelihood of a suffix given an embedding vector.
-    """
+    """Return (log‑likelihood, grad‑likelihood) functions depending only on *z*."""
 
     # suffix_ids = tokenizer.encode(suffix, add_special_tokens=False)
     ids_tensor = torch.tensor(suffix_ids, device=device)
@@ -72,7 +72,7 @@ def build_suffix_likelihood(
         log_p = torch.zeros(N, device=device)
         for pos, tok_id in enumerate(suffix_ids):
             step_logits = logits[:, pos+1, :]
-            log_p += log_softmax(step_logits, dim=-1)[:, tok_id]
+            log_p += torch.log_softmax(step_logits, dim=-1)[:, tok_id]
         return log_p                                      # (N,)
 
     def grad(z: torch.Tensor) -> torch.Tensor:
