@@ -1,5 +1,5 @@
 import math
-from typing import Callable, Sequence, Tuple
+from typing import List
 
 import torch
 from torch.nn.functional import log_softmax
@@ -46,14 +46,14 @@ def build_relaxed_single_token_prior(
 def build_suffix_likelihood(
     model: GPT2LMHeadModel,
     tokenizer: GPT2Tokenizer,
-    suffix: str,
+    suffix_ids: List[int],
     device: torch.device,
 ):
     """
     Calculates the log-likelihood of a suffix given an embedding vector.
     """
 
-    suffix_ids = tokenizer.encode(suffix, add_special_tokens=False)
+    # suffix_ids = tokenizer.encode(suffix, add_special_tokens=False)
     ids_tensor = torch.tensor(suffix_ids, device=device)
     bos_tensor = torch.tensor([tokenizer.bos_token_id], device=device)
     with torch.no_grad():
