@@ -79,3 +79,15 @@ def build_suffix_likelihood(
         return torch.func.grad(lambda x: logp(x).sum())(z)
 
     return logp, grad
+
+def project_to_vocab(
+    z: torch.Tensor,
+    model: GPT2LMHeadModel,
+    tokenizer: GPT2Tokenizer,
+    device: torch.device,
+) -> List[str]:
+    embedding_matrix = model.transformer.wte.weight.detach()
+    distances = torch.cdist(z, embedding_matrix)          # (N,V)
+    token_idxs = distances.argmin(dim=1)                  # (N,)
+    tokens = tokenizer.convert_ids_to_tokens(token_idxs)
+    return tokens

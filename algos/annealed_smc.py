@@ -23,7 +23,7 @@ class AnnealedSMC:
         sigma_0       : initial (largest) σ
         sigma_target  : final (smallest) σ
         alpha         : resampling threshold fraction (i.e. resample when ESS/N < alpha)
-        mala_step_size: MALA step size ε
+        mala_step_size: MALA step size ε (can be a function of σ)
         mala_steps    : number of MALA iterations per SMC stage
         ess_tol       : tolerance for bisection when adapting σ
         ess_min_frac  : minimal ESS fraction to keep at each stage (e.g. 0.5)
@@ -101,7 +101,10 @@ class AnnealedSMC:
         """
         One full MALA sweep on all particles.  Returns updated X.
         """
-        eps = self.mala_step_size
+        if callable(self.mala_step_size):
+            eps = self.mala_step_size(sigma)
+        else:
+            eps = self.mala_step_size
         for _ in range(self.mala_steps):
             with torch.no_grad(): # TODO: figure out which thing requires_grad
                 grad = grad_log_target(X, sigma)   # shape (N, x_dim)
@@ -129,18 +132,18 @@ class AnnealedSMC:
                 X = torch.where(accept, X_prop, X)
         return X
 
-    def run(self, init_sampler, init_logp, log_target, grad_log_target):
+    def run(self, init_sampler, init_logp, log_target, grad_log_target, debug_logger=None):
         """
         Runs the full adaptive‐SMC‐with‐MALA algorithm, returns final particles X.
         """
         # 1. initialize
         self.initialize(init_sampler, init_logp)
 
-        progress = tqdm(range(100), desc="Running SMC")
+        progress = tqdm(range(100), desc=f"Running SMC (ESS = {self.N})")
 
         # we want to display progress in log-sigma space
         def convert_sigma_to_index(sigma):
-            return int(np.log(sigma / self.sigma_target) / np.log(self.sigma_0 / self.sigma_target) * 100)
+            return 100 - int(np.log(sigma / self.sigma_target) / np.log(self.sigma_0 / self.sigma_target) * 100)
         
         curr_index = convert_sigma_to_index(self.sigma_0)
 
@@ -157,14 +160,14 @@ class AnnealedSMC:
                 delta = log_target(self.X, sigma_t) - log_target(self.X, self.sigma_prev)
             else:
                 delta = log_target(self.X, sigma_t) - init_logp(self.X)
-            print(f"delta: {delta}")
             self.logw += delta
 
             # 2c. check ESS → maybe resample
             ess = self.compute_ess(self.logw)
-            print(f"current ESS: {ess}")
-            if ess < self.alpha * self.N:
-                print("resampling...")
+            # print(f"current ESS: {ess}")
+            progress.set_description(f"Running SMC (ESS = {ess:.4e})")
+            if ess < self.alpha * self.N or self.sigma_prev == sigma_t:
+                # print("resampling...")
                 self.resample()
 
             # 2d. mutate with MALA
@@ -176,8 +179,12 @@ class AnnealedSMC:
 
             # update progress bar
             new_index = convert_sigma_to_index(self.sigma_prev)
+            print(f"new_index: {new_index}, curr_index: {curr_index}")
             if new_index > curr_index:
                 progress.update(new_index - curr_index)
                 curr_index = new_index
+
+            if debug_logger is not None:
+                debug_logger(self.X, self.sigma_prev)
 
         return self.X
