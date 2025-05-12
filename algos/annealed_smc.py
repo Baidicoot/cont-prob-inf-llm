@@ -1,5 +1,7 @@
 import torch
 from torch.distributions import Categorical
+from tqdm import tqdm
+import numpy as np
 
 class AnnealedSMC:
     def __init__(
@@ -39,8 +41,8 @@ class AnnealedSMC:
         self.device = device
 
         # allocate
-        self.X = torch.zeros(N, x_dim, device=device)
-        self.logw = torch.zeros(N, device=device)  # unnormalized log-weights
+        self.X = torch.zeros(N, x_dim, device=device, dtype=torch.float32)
+        self.logw = torch.zeros(N, device=device, dtype=torch.float32)  # unnormalized log-weights
 
     def initialize(self, init_sampler):
         """
@@ -52,7 +54,8 @@ class AnnealedSMC:
 
     @staticmethod
     def compute_ess(logw):
-        w = torch.exp(logw - torch.logsumexp(logw, 0))
+        w = torch.softmax(logw, 0)
+        print(f"w: {w}")
         return 1.0 / torch.sum(w * w)
 
     def adapt_sigma(self, log_target):
@@ -98,31 +101,32 @@ class AnnealedSMC:
         """
         eps = self.mala_step_size
         for _ in range(self.mala_steps):
-            grad = grad_log_target(X, sigma)   # shape (N, x_dim)
-            noise = torch.randn_like(X)
-            X_prop = X + 0.5 * eps**2 * grad + eps * noise
+            with torch.no_grad(): # TODO: figure out which thing requires_grad
+                grad = grad_log_target(X, sigma)   # shape (N, x_dim)
+                noise = torch.randn_like(X)
+                X_prop = X + 0.5 * eps**2 * grad + eps * noise
 
-            # compute Metropolis–Hastings acceptance
-            log_u = torch.log(torch.rand(self.N, device=self.device))
-            logp_curr = log_target(X, sigma)
-            logp_prop = log_target(X_prop, sigma)
+                # compute Metropolis–Hastings acceptance
+                log_u = torch.log(torch.rand(self.N, device=self.device))
+                logp_curr = log_target(X, sigma)
+                logp_prop = log_target(X_prop, sigma)
 
-            # proposal correction q(x|x') vs q(x'|x)
-            # forward: X -> X_prop
-            diff_fwd = X_prop - X - 0.5 * eps**2 * grad
-            log_q_fwd = -0.5 * (diff_fwd**2).sum(dim=1) / eps**2
+                # proposal correction q(x|x') vs q(x'|x)
+                # forward: X -> X_prop
+                diff_fwd = X_prop - X - 0.5 * eps**2 * grad
+                log_q_fwd = -0.5 * (diff_fwd**2).sum(dim=1) / eps**2
 
-            grad_prop = grad_log_target(X_prop, sigma)
-            diff_rev = X - X_prop - 0.5 * eps**2 * grad_prop
-            log_q_rev = -0.5 * (diff_rev**2).sum(dim=1) / eps**2
+                grad_prop = grad_log_target(X_prop, sigma)
+                diff_rev = X - X_prop - 0.5 * eps**2 * grad_prop
+                log_q_rev = -0.5 * (diff_rev**2).sum(dim=1) / eps**2
 
-            log_accept_ratio = (logp_prop + log_q_rev) - (logp_curr + log_q_fwd)
-            accept = (log_u < log_accept_ratio).unsqueeze(1)
+                log_accept_ratio = (logp_prop + log_q_rev) - (logp_curr + log_q_fwd)
+                accept = (log_u < log_accept_ratio).unsqueeze(1)
 
-            # update
-            X = torch.where(accept, X_prop, X)
+                # update
+                X = torch.where(accept, X_prop, X)
 
-            print(f"acceptance rate: {accept.float().mean()}")
+                print(f"acceptance rate: {accept.float().mean()}")
         return X
 
     def run(self, init_sampler, log_target, grad_log_target):

@@ -32,13 +32,13 @@ def build_relaxed_single_token_prior(
         return torch.logsumexp(log_weighted, dim=-1)                    # (N,)
 
     def grad(z: torch.Tensor, σ: float) -> torch.Tensor:
-        return torch.func.grad(lambda x: logp(x, σ).sum())(z, σ)
+        return torch.func.grad(lambda x: logp(x, σ).sum())(z)
 
     def sample(num: int, σ: float) -> torch.Tensor:
         cat = Categorical(prior_probs)
         tokens = cat.sample((num,))                                     # (num,)
         base = E[tokens]                                                # (num,d)
-        noise = torch.randn_like(base) * σ
+        noise = torch.randn_like(base, dtype=torch.float32) * σ
         return base + noise
 
     return logp, grad, sample
@@ -78,4 +78,4 @@ def build_suffix_likelihood(
     def grad(z: torch.Tensor) -> torch.Tensor:
         return torch.func.grad(lambda x: logp(x).sum())(z)
 
-    return logp, grad, suffix_ids
+    return logp, grad
